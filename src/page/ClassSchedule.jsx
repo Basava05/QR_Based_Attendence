@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Input from "../component/Input";
 import MapModal from "../component/MapModal";
+import axios from "axios";
 import QRCodeModal from "../component/QRCodeModal";
 import scheduleImg from "../../public/scheduleImg.jpg";
 import logo from "../../public/trackAS.png";
@@ -36,7 +37,50 @@ const ClassSchedule = () => {
 
   const handleLocationChange = (locationName, coordinate) => {
     setFormData({ ...formData, lectureVenue: locationName });
-    setSelectedLocationCordinate(coordinate);
+    // normalize numbers
+    setSelectedLocationCordinate({
+      lat: Number(coordinate.lat),
+      lng: Number(coordinate.lng),
+    });
+  };
+
+  const handleUseMyLocation = () => {
+    if (!navigator.geolocation) {
+      toast.error("Geolocation is not supported by this browser.");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = Number(position.coords.latitude);
+        const lng = Number(position.coords.longitude);
+
+        try {
+          const resp = await axios.get("https://nominatim.openstreetmap.org/reverse", {
+            params: { format: "json", lat, lon: lng },
+          });
+          const name = resp.data.display_name || "Current Location";
+          setFormData({ ...formData, lectureVenue: name });
+          setSelectedLocationCordinate({ lat, lng });
+        } catch (err) {
+          console.error("Reverse geocode failed:", err);
+          setFormData({ ...formData, lectureVenue: "Current Location" });
+          setSelectedLocationCordinate({ lat, lng });
+        }
+      },
+      (err) => {
+        toast.error(`Error getting location: ${err.message}`);
+      },
+      { enableHighAccuracy: true }
+    );
+  };
+
+  const handleSwapCoords = () => {
+    if (!selectedLocationCordinate) return;
+    setSelectedLocationCordinate((prev) => ({
+      lat: Number(prev.lng),
+      lng: Number(prev.lat),
+    }));
   };
 
   const lecturerId = userDetails?.lecturer_id;
@@ -100,15 +144,45 @@ const ClassSchedule = () => {
     } else {
       toast.success("Class schedule created successfully");
 
-      // Extract and use the generated course_id
-      const generatedCourseId = data[0]?.course_id;
-      const updatedRegistrationLink = `${VERCEL_URL}/attendance?courseId=${encodeURIComponent(
-        generatedCourseId
-      )}&time=${encodeURIComponent(time)}&courseCode=${encodeURIComponent(
-        courseCode
-      )}&lat=${selectedLocationCordinate?.lat}&lng=${
-        selectedLocationCordinate?.lng
-      }`;
+        // Extract and use the generated course_id. If insert didn't return an id, try to find it.
+        let returnedRow = data && data[0] ? data[0] : null;
+        let generatedCourseId = returnedRow?.course_id ?? returnedRow?.id ?? null;
+        if (!generatedCourseId) {
+          console.debug("Insert did not return course id, searching for row...", { courseCode, time, lecturerId });
+          try {
+            const { data: found, error: findErr } = await supabase
+              .from("classes")
+              .select("course_id")
+              .eq("course_code", courseCode)
+              .eq("time", new Date(`${date}T${time}`).toISOString())
+              .eq("lecturer_id", lecturerId)
+              .limit(1)
+              .single();
+            if (!findErr && found) {
+              generatedCourseId = found.course_id ?? found.id ?? generatedCourseId;
+            } else {
+              console.debug("Could not find inserted class row:", findErr);
+            }
+          } catch (e) {
+            console.debug("Error while attempting to lookup created class:", e);
+          }
+        }
+
+        // Choose base URL: prefer the current browser origin (localhost during dev),
+        // falling back to VERCEL_URL when origin isn't available.
+        const baseUrl = (typeof window !== "undefined" && window.location && window.location.origin)
+          ? window.location.origin
+          : (VERCEL_URL || "");
+
+        const updatedRegistrationLink = `${baseUrl}/attendance?${new URLSearchParams({
+          courseId: generatedCourseId == null ? "" : String(generatedCourseId),
+          time: time || "",
+          courseCode: courseCode || "",
+          lat: selectedLocationCordinate?.lat ? String(selectedLocationCordinate.lat) : "",
+          lng: selectedLocationCordinate?.lng ? String(selectedLocationCordinate.lng) : "",
+        }).toString()}`;
+
+        console.debug("Generated registration link:", updatedRegistrationLink, "generatedCourseId:", generatedCourseId);
 
       // Set the QR code data and open the QR modal
       setQrData(updatedRegistrationLink);
@@ -164,14 +238,33 @@ const ClassSchedule = () => {
                   readOnly
                   required={true}
                 />
-                <button
-                  type="button"
-                  onClick={() => setIsMapModalOpen(true)}
-                  className="btn absolute right-0 top-9 px-3 bg-green-500 text-white rounded-r-md hover:bg-green-600 transition-colors"
-                >
-                  Select Location
-                </button>
+                <div className="absolute right-0 top-9 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsMapModalOpen(true)}
+                    className="btn px-3 bg-green-500 text-white rounded-r-md hover:bg-green-600 transition-colors"
+                  >
+                    Select Location
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleUseMyLocation}
+                    className="btn px-3 bg-indigo-500 text-white rounded-r-md hover:bg-indigo-600 transition-colors"
+                  >
+                    Use My Current Location
+                  </button>
+                </div>
               </div>
+              {selectedLocationCordinate && (
+                <div className="mt-2 text-sm text-neutral-700">
+                  <div>
+                    <b>Selected coords:</b> Lat: {selectedLocationCordinate.lat}, Lng: {selectedLocationCordinate.lng}
+                  </div>
+                  <div className="mt-1">
+                    <button type="button" onClick={handleSwapCoords} className="btn btn-xs bg-yellow-500 text-white">Swap coords</button>
+                  </div>
+                </div>
+              )}
               <Input
                 name="time"
                 type="time"
@@ -217,6 +310,7 @@ const ClassSchedule = () => {
           <MapModal
             onClose={() => setIsMapModalOpen(false)}
             onSelectLocation={handleLocationChange}
+            initialPosition={selectedLocationCordinate}
           />
         )}
 

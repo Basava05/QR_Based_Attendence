@@ -14,26 +14,41 @@ const PreviousClass = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  const lecturerId = userDetails?.lecturer_id;
+  // Derive lecturer id from multiple possible user fields
+  const lecturerId =
+    userDetails?.lecturer_id ?? userDetails?.lecturerId ?? userDetails?.id ?? userDetails?.user_id;
 
   // Function to fetch classes based on lecturer_id
   const fetchClasses = async () => {
-    if (!lecturerId) return;
-
     setIsLoading(true);
 
-    const { data, error } = await supabase
-      .from("classes")
-      .select("*")
-      .eq("lecturer_id", lecturerId);
-
-    if (error) {
-      toast.error(`Error fetching class data: ${error.message}`);
-    } else {
-      setClasses(data);
+    try {
+      if (lecturerId) {
+        console.debug("Fetching classes for lecturer_id:", lecturerId);
+        const { data, error } = await supabase.from("classes").select("*").eq("lecturer_id", lecturerId);
+        if (error) {
+          toast.error(`Error fetching class data: ${error.message}`);
+        } else {
+          setClasses(data || []);
+        }
+      } else if (userDetails?.email) {
+        console.debug("No lecturer_id found, falling back to lecturer_email:", userDetails.email);
+        const { data, error } = await supabase.from("classes").select("*").eq("location_name", userDetails.email);
+        // Note: using lecturer_email column would be ideal; adjust if schema differs.
+        if (error) {
+          toast.error(`Error fetching class data by email: ${error.message}`);
+        } else {
+          setClasses(data || []);
+        }
+      } else {
+        console.debug("Unable to determine lecturerId from userDetails:", userDetails);
+      }
+    } catch (err) {
+      console.error("Unexpected error fetching classes:", err);
+      toast.error("Unexpected error fetching classes");
+    } finally {
+      setIsLoading(false);
     }
-
-    setIsLoading(false); // Ensure loading state is reset in both cases
   };
 
   // Fetch classes when component mounts or lecturerId changes

@@ -20,6 +20,10 @@ const StudentLogin = () => {
   const [classDetails, setClassDetails] = useState(null);
   const [matricNumber, setMatricNumber] = useState("");
   const [name, setName] = useState("");
+  const [userCoords, setUserCoords] = useState(null);
+  const [targetCoords, setTargetCoords] = useState(null);
+  const [thresholdMeters, setThresholdMeters] = useState(20);
+  const [autoSwapEnabled, setAutoSwapEnabled] = useState(true);
 
   const courseId = queryParams.get("courseId");
   const courseCode = queryParams.get("courseCode");
@@ -38,25 +42,78 @@ const StudentLogin = () => {
         console.error("Error fetching class details:", error);
       } else {
         setClassDetails(data);
+        // parse stored location field
+        const rawLocation = data?.location;
+        console.debug("Fetched raw stored location:", rawLocation);
+        const parsed = parsePoint(rawLocation);
+        console.debug("Parsed target coords:", parsed);
+        setTargetCoords(parsed);
       }
     };
 
     fetchClassDetails();
   }, [courseId]);
 
+  // Parse SRID=4326;POINT(lng lat) or GeoJSON-like shapes
+  function parsePoint(raw) {
+    if (!raw) return null;
+    try {
+      if (typeof raw === "string") {
+        const sridMatch = raw.match(/SRID=\d+;POINT\(([-0-9.]+)\s+([-0-9.]+)\)/i);
+        if (sridMatch) {
+          const lng = parseFloat(sridMatch[1]);
+          const lat = parseFloat(sridMatch[2]);
+          return { lat, lng };
+        }
+
+        // Try JSON parse for GeoJSON
+        const json = JSON.parse(raw);
+        if (json && json.coordinates) {
+          return { lat: Number(json.coordinates[1]), lng: Number(json.coordinates[0]) };
+        }
+      } else if (typeof raw === "object") {
+        if (raw.coordinates) return { lat: Number(raw.coordinates[1]), lng: Number(raw.coordinates[0]) };
+        if (raw.lat != null && raw.lng != null) return { lat: Number(raw.lat), lng: Number(raw.lng) };
+      }
+    } catch (e) {
+      console.debug("parsePoint error:", e);
+    }
+    return null;
+  }
+
   useEffect(() => {
     const getUserLocation = () => {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           (position) => {
-            const userLat = position.coords.latitude;
-            const userLng = position.coords.longitude;
+            const userLat = Number(position.coords.latitude);
+            const userLng = Number(position.coords.longitude);
+            setUserCoords({ lat: userLat, lng: userLng });
 
-            const distance = calculateDistance(userLat, userLng, lat, lng);
+            // compute distance to target coords, with auto-swap heuristic
+            let t = targetCoords ?? (lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null);
+            if (!t) {
+              setUserDistance(null);
+              setIsWithinRange(false);
+              return;
+            }
+
+            const d1 = calculateDistance(userLat, userLng, t.lat, t.lng);
+            const dSwapped = calculateDistance(userLat, userLng, t.lng, t.lat);
+            console.debug("Distance normal:", d1, "Distance swapped:", dSwapped);
+
+            if (autoSwapEnabled && dSwapped < d1) {
+              // adopt swapped coords
+              t = { lat: Number(t.lng), lng: Number(t.lat) };
+              console.debug("Adopting swapped target coords:", t);
+            }
+
+            setTargetCoords(t);
+            const distance = calculateDistance(userLat, userLng, t.lat, t.lng);
             setUserDistance(distance);
 
-            // Check if the distance is within 20 meters
-            setIsWithinRange(distance <= 20);
+            // Check if the distance is within thresholdMeters
+            setIsWithinRange(distance <= Number(thresholdMeters));
           },
           (error) => {
             toast.error(`Error getting user location., ${error.message}`);
@@ -68,7 +125,7 @@ const StudentLogin = () => {
     };
 
     getUserLocation();
-  }, [lat, lng]);
+  }, [lat, lng, targetCoords, thresholdMeters, autoSwapEnabled]);
 
   const handleRegister = async (e) => {
     e.preventDefault();
@@ -145,38 +202,36 @@ const StudentLogin = () => {
         {classDetails && (
           <div className="flex justify-between items-center">
             <div>
-              <p className="text-[#000D46] font-bold">
-                Title {classDetails.course_title}
-              </p>
+              <div className="text-[#000D46] font-bold">Title {classDetails.course_title}</div>
 
-              <p className="text-[#000D46]  font-bold">Code: {courseCode}</p>
+              <div className="text-[#000D46]  font-bold">Code: {courseCode}</div>
 
-              <p>
-                <p className="text-[#000D46]  font-bold">
-                  Venue: {classDetails.location_name}
-                </p>
-                <p className="text-[#000D46]  font-bold">
-                  Date: {dayjs(classDetails.date).format("DD MMMM, YYYY")}
-                </p>
-                <p className="text-[#000D46]  font-bold">
-                  Time:{" "}
-                  {new Date(classDetails.time).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    hour12: true,
-                  })}
-                </p>
-                <p className="text-[#000D46] mb-2 text-lg font-bold">
-                  Note: {classDetails.note}
-                </p>
-                Distance to Lecture Venue:{" "}
-                {userDistance
-                  ? `${userDistance.toFixed(2)} meters`
-                  : "Calculating..."}
-              </p>
+              <div className="mt-2">
+                <div className="text-[#000D46]  font-bold">Venue: {classDetails.location_name}</div>
+                <div className="text-[#000D46]  font-bold">Date: {dayjs(classDetails.date).format("DD MMMM, YYYY")}</div>
+                <div className="text-[#000D46]  font-bold">Time: {new Date(classDetails.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })}</div>
+                <div className="text-[#000D46] mb-2 text-lg font-bold">Note: {classDetails.note}</div>
+                <div>Distance to Lecture Venue: {userDistance ? `${userDistance.toFixed(2)} meters` : "Calculating..."}</div>
+              </div>
             </div>
           </div>
         )}
+
+        <div className="mt-4 mb-4">
+          <div className="text-sm mb-2">
+            <b>Your coords:</b> {userCoords ? `${userCoords.lat.toFixed(6)}, ${userCoords.lng.toFixed(6)}` : "unknown"}
+          </div>
+          <div className="text-sm">
+            <b>Target coords:</b> {targetCoords ? `${targetCoords.lat.toFixed(6)}, ${targetCoords.lng.toFixed(6)}` : "unknown"}
+          </div>
+
+          <div className="mt-2 flex gap-2 items-center">
+            <label className="text-sm">Threshold meters:</label>
+            <input type="number" value={thresholdMeters} onChange={(e) => setThresholdMeters(Number(e.target.value))} className="input input-sm w-24" />
+            <label className="ml-4 text-sm">Auto-swap:</label>
+            <input type="checkbox" checked={autoSwapEnabled} onChange={(e) => setAutoSwapEnabled(e.target.checked)} />
+          </div>
+        </div>
         <form onSubmit={handleRegister}>
           <Input
             type="text"
