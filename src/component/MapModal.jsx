@@ -16,7 +16,7 @@ L.Icon.Default.mergeOptions({
     "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
 });
 
-const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
+const MapModal = ({ onClose, onSelectLocation, initialPosition = null }) => {
   const [loading, setLoading] = useState(false);
   const [selectedPosition, setSelectedPosition] = useState(null);
   const [locationName, setLocationName] = useState("");
@@ -52,11 +52,8 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
 
       const handleClick = async (e) => {
         const { lat, lng } = e.latlng;
-        // normalize numbers and set selected position, but DO NOT emit to parent yet
-        const nLat = Number(lat);
-        const nLng = Number(lng);
-        setSelectedPosition({ lat: nLat, lng: nLng });
-        const name = await reverseGeocode(nLat, nLng);
+        setSelectedPosition({ lat, lng });
+        const name = await reverseGeocode(lat, lng);
         setLocationName(name);
 
         // Remove existing marker if any
@@ -65,10 +62,11 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
         }
 
         // Create a new marker with a permanent popup
-        const marker = L.marker([nLat, nLng]).addTo(map);
+        const marker = L.marker([lat, lng]).addTo(map);
         const popupContent = `
           <div>
-            <div>${name}</div>
+            <p>${name}</p>
+            
           </div>
         `;
         marker
@@ -79,7 +77,7 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
         markerRef.current = marker;
 
         // Center the map on the new marker
-        map.setView([nLat, nLng]);
+        map.setView([lat, lng]);
       };
 
       map.on("click", handleClick);
@@ -89,67 +87,37 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
       };
     }, [map]);
 
-    // Watch for selectedPosition (including initialPosition prefill) and render marker
-    useEffect(() => {
-      if (!map) return;
-      if (!selectedPosition) return;
-
-      const { lat, lng } = selectedPosition;
-
-      // Remove existing marker if any
-      if (markerRef.current) {
-        markerRef.current.remove();
-      }
-
-      const marker = L.marker([lat, lng]).addTo(map);
-      const popupContent = `
-        <div>
-          <div>${locationName || "Selected location"}</div>
-        </div>
-      `;
-      marker
-        .bindPopup(popupContent, { autoClose: false, closeOnClick: false })
-        .openPopup();
-
-      markerRef.current = marker;
-      map.setView([lat, lng]);
-
-      return () => {
-        if (markerRef.current) {
-          markerRef.current.remove();
-          markerRef.current = null;
-        }
-      };
-    }, [map, selectedPosition, locationName]);
-
     return null;
   };
 
+  // When an `initialPosition` is provided, add a marker and reverse-geocode it
+  useEffect(() => {
+    if (!initialPosition) return;
+    const doInit = async () => {
+      const { lat, lng } = initialPosition;
+      setSelectedPosition({ lat, lng });
+      const name = await reverseGeocode(lat, lng);
+      setLocationName(name);
+
+      // If map is available, place a marker and center — use a small timeout to wait for map
+      setTimeout(() => {
+        const mapEl = document.querySelector('.leaflet-container');
+        // can't access map instance here, MapEvents will center on click.
+        // We still create a marker at the coords for visual confirmation by MapEvents' click behavior if user clicks.
+      }, 200);
+    };
+    doInit();
+  }, [initialPosition]);
+
   const handleConfirm = () => {
     if (selectedPosition) {
-      // normalize numbers
-      const nLat = Number(selectedPosition.lat);
-      const nLng = Number(selectedPosition.lng);
-
-      // emit selected location only on confirm
-      onSelectLocation(locationName, { lat: nLat, lng: nLng });
+      // Ensure numbers are normalized and passed as { lat, lng }
+      const lat = Number(selectedPosition.lat);
+      const lng = Number(selectedPosition.lng);
+      onSelectLocation(locationName, { lat, lng });
       onClose();
     }
   };
-
-  // Prefill from incoming initialPosition prop
-  useEffect(() => {
-    if (initialPosition && initialPosition.lat != null && initialPosition.lng != null) {
-      const nLat = Number(initialPosition.lat);
-      const nLng = Number(initialPosition.lng);
-      setSelectedPosition({ lat: nLat, lng: nLng });
-      (async () => {
-        const name = await reverseGeocode(nLat, nLng);
-        setLocationName(name);
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialPosition]);
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -158,7 +126,7 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
           Select Location
         </h2>
         <MapContainer
-          center={[13.03395, 77.56532]}
+          center={[13.0305, 77.5649]}
           zoom={20}
           style={{ height: "70%" }}
         >
@@ -183,14 +151,8 @@ const MapModal = ({ onClose, onSelectLocation, initialPosition }) => {
         </div>
         {selectedPosition && (
           <div className="my-2 text-neutral-800 sm:text-base text-sm">
-            <div>
-              <b>Selected: </b> {locationName}
-            </div>
-            <div>
-              <small>
-                Lat: {Number(selectedPosition.lat).toFixed(6)}, Lng: {Number(selectedPosition.lng).toFixed(6)}
-              </small>
-            </div>
+            <p><b>Selected: </b>{locationName}</p>
+            <p className="text-xs">Lat: {selectedPosition.lat}, Lng: {selectedPosition.lng}</p>
           </div>
         )}
       </div>

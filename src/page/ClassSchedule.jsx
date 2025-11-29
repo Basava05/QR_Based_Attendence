@@ -1,7 +1,6 @@
 import { useState } from "react";
 import Input from "../component/Input";
 import MapModal from "../component/MapModal";
-import axios from "axios";
 import QRCodeModal from "../component/QRCodeModal";
 import scheduleImg from "../../public/scheduleImg.jpg";
 import logo from "../../public/trackAS.png";
@@ -12,6 +11,15 @@ import toast from "react-hot-toast";
 import { Link } from "react-router-dom";
 
 const VERCEL_URL = import.meta.env.VITE_VERCEL_URL;
+const LOCAL_URL = import.meta.env.VITE_LOCALHOST_URL;
+
+const getBaseUrl = () => {
+  if (VERCEL_URL && VERCEL_URL !== "your_vercel_app_url") return VERCEL_URL;
+  if (LOCAL_URL) return LOCAL_URL;
+  if (typeof window !== "undefined" && window.location && window.location.origin)
+    return window.location.origin;
+  return "http://localhost:5173";
+};
 
 const ClassSchedule = () => {
   const { userDetails } = useUserDetails();
@@ -30,6 +38,7 @@ const ClassSchedule = () => {
   const [qrData, setQrData] = useState("");
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
   const [isQRModalOpen, setIsQRModalOpen] = useState(false);
+  const [getLocationLoading, setGetLocationLoading] = useState(false);
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -37,11 +46,10 @@ const ClassSchedule = () => {
 
   const handleLocationChange = (locationName, coordinate) => {
     setFormData({ ...formData, lectureVenue: locationName });
-    // normalize numbers
-    setSelectedLocationCordinate({
-      lat: Number(coordinate.lat),
-      lng: Number(coordinate.lng),
-    });
+    // Normalize coordinate values to numbers and ensure shape { lat, lng }
+    const lat = Number(coordinate?.lat);
+    const lng = Number(coordinate?.lng);
+    setSelectedLocationCordinate({ lat, lng });
   };
 
   const handleUseMyLocation = () => {
@@ -50,40 +58,49 @@ const ClassSchedule = () => {
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const lat = Number(position.coords.latitude);
-        const lng = Number(position.coords.longitude);
+    setGetLocationLoading(true);
 
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
         try {
-          const resp = await axios.get("https://nominatim.openstreetmap.org/reverse", {
-            params: { format: "json", lat, lon: lng },
-          });
-          const name = resp.data.display_name || "Current Location";
-          setFormData({ ...formData, lectureVenue: name });
+          const lat = Number(pos.coords.latitude);
+          const lng = Number(pos.coords.longitude);
+
+          // Reverse geocode with Nominatim
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}`,
+            {
+              headers: { "User-Agent": "TrackAS/1.0 (contact@local)" },
+            }
+          );
+          const json = await res.json();
+          const displayName = json?.display_name || `Lat ${lat}, Lng ${lng}`;
+
+          setFormData((fd) => ({ ...fd, lectureVenue: displayName }));
           setSelectedLocationCordinate({ lat, lng });
+          toast.success("Location set from your device.");
         } catch (err) {
           console.error("Reverse geocode failed:", err);
-          setFormData({ ...formData, lectureVenue: "Current Location" });
-          setSelectedLocationCordinate({ lat, lng });
+          toast.error("Failed to reverse-geocode your location.");
+        } finally {
+          setGetLocationLoading(false);
         }
       },
       (err) => {
-        toast.error(`Error getting location: ${err.message}`);
+        console.error("Geolocation error:", err);
+        toast.error(`Unable to get your location: ${err.message}`);
+        setGetLocationLoading(false);
       },
-      { enableHighAccuracy: true }
+      { enableHighAccuracy: true, timeout: 10000 }
     );
   };
 
-  const handleSwapCoords = () => {
+  const swapSelectedCoords = () => {
     if (!selectedLocationCordinate) return;
-    setSelectedLocationCordinate((prev) => ({
-      lat: Number(prev.lng),
-      lng: Number(prev.lat),
-    }));
+    const { lat, lng } = selectedLocationCordinate;
+    setSelectedLocationCordinate({ lat: Number(lng), lng: Number(lat) });
   };
 
-  // Ensure we source lecturer_id directly from userDetails
   const lecturerId = userDetails?.lecturer_id;
 
   const handleSubmit = async (e) => {
@@ -91,40 +108,44 @@ const ClassSchedule = () => {
 
     let locationGeography = null;
     if (selectedLocationCordinate) {
-      locationGeography = `SRID=4326;POINT(${selectedLocationCordinate.lng} ${selectedLocationCordinate.lat})`;
+      // Ensure numeric ordering: PostGIS EWKT expects POINT(lng lat)
+      const lat = Number(selectedLocationCordinate.lat);
+      const lng = Number(selectedLocationCordinate.lng);
+
+      // Basic sanity check: if lat is out of range, attempt to swap
+      const isLatValid = Number.isFinite(lat) && lat >= -90 && lat <= 90;
+      const isLngValid = Number.isFinite(lng) && lng >= -180 && lng <= 180;
+      let finalLat = lat;
+      let finalLng = lng;
+      if (!isLatValid && isLngValid) {
+        // Likely swapped
+        finalLat = lng;
+        finalLng = lat;
+        console.warn("Swapped lat/lng before storing due to sanity check");
+      }
+
+      locationGeography = `SRID=4326;POINT(${finalLng} ${finalLat})`;
     }
 
     const { courseTitle, courseCode, lectureVenue, time, date, note } =
       formData;
 
-    const registrationLink = `${VERCEL_URL}/studentLogin?courseCode=${encodeURIComponent(
+    const base = getBaseUrl();
+    const registrationLink = `${base}/studentLogin?courseCode=${encodeURIComponent(
       courseCode
     )}&time=${encodeURIComponent(time)}&lectureVenue=${encodeURIComponent(
       lectureVenue
-    )}&lat=${selectedLocationCordinate?.lat}&lng=${
+    )}&lat=${encodeURIComponent(selectedLocationCordinate?.lat)}&lng=${encodeURIComponent(
       selectedLocationCordinate?.lng
-    }`;
+    )}`;
 
-    // Generate QR code with registration link
-    const qrCodeDataUrl = await new Promise((resolve) => {
-      const svg = document.createElement("div");
-      const qrCode = <QRCodeSVG value={registrationLink} size={256} />;
-      import("react-dom/client").then((ReactDOM) => {
-        ReactDOM.createRoot(svg).render(qrCode);
-        setTimeout(() => {
-          const svgString = new XMLSerializer().serializeToString(
-            svg.querySelector("svg")
-          );
-          const dataUrl = `data:image/svg+xml;base64,${btoa(svgString)}`;
-          resolve(dataUrl);
-        }, 0);
-      });
-    });
+    // Use the registration link as the QR payload (simpler and more reliable)
+    const qrPayload = registrationLink;
 
-    // Save the data to Supabase
-    const { data, error } = await supabase
-      .from("classes")
-      .insert([
+    // Save the data to Supabase (request all returned columns)
+    let data, error;
+    try {
+      const res = await supabase.from("classes").insert([
         {
           course_title: courseTitle,
           course_code: courseCode,
@@ -132,12 +153,18 @@ const ClassSchedule = () => {
           date: new Date(date).toISOString(),
           location: locationGeography,
           note: note,
-          qr_code: qrCodeDataUrl,
-          lecturer_id: userDetails?.lecturer_id,
+          qr_code: qrPayload,
+          lecturer_id: lecturerId,
           location_name: lectureVenue,
         },
-      ])
-      .select("course_id");
+      ]).select();
+      data = res.data;
+      error = res.error;
+    } catch (err) {
+      console.error(err);
+      toast.error(`Error inserting class schedule data, ${err.message}`);
+      return;
+    }
 
     if (error) {
       toast.error(`Error inserting class schedule data, ${error.message}`);
@@ -145,45 +172,22 @@ const ClassSchedule = () => {
     } else {
       toast.success("Class schedule created successfully");
 
-        // Extract and use the generated course_id. If insert didn't return an id, try to find it.
-        let returnedRow = data && data[0] ? data[0] : null;
-        let generatedCourseId = returnedRow?.course_id ?? returnedRow?.id ?? null;
-        if (!generatedCourseId) {
-          console.debug("Insert did not return course id, searching for row...", { courseCode, time, lecturerId });
-          try {
-            const { data: found, error: findErr } = await supabase
-              .from("classes")
-              .select("course_id")
-              .eq("course_code", courseCode)
-              .eq("time", new Date(`${date}T${time}`).toISOString())
-              .eq("lecturer_id", lecturerId)
-              .limit(1)
-              .single();
-            if (!findErr && found) {
-              generatedCourseId = found.course_id ?? found.id ?? generatedCourseId;
-            } else {
-              console.debug("Could not find inserted class row:", findErr);
-            }
-          } catch (e) {
-            console.debug("Error while attempting to lookup created class:", e);
-          }
-        }
+      // Support both `course_id` and `id` primary key naming.
+      const generatedCourseId = data?.[0]?.course_id ?? data?.[0]?.id ?? null;
 
-        // Choose base URL: prefer the current browser origin (localhost during dev),
-        // falling back to VERCEL_URL when origin isn't available.
-        const baseUrl = (typeof window !== "undefined" && window.location && window.location.origin)
-          ? window.location.origin
-          : (VERCEL_URL || "");
+      if (!generatedCourseId) {
+        toast.error("Could not determine generated course id after insert.");
+        console.error("Insert returned no primary key:", data);
+        return;
+      }
 
-        const updatedRegistrationLink = `${baseUrl}/attendance?${new URLSearchParams({
-          courseId: generatedCourseId == null ? "" : String(generatedCourseId),
-          time: time || "",
-          courseCode: courseCode || "",
-          lat: selectedLocationCordinate?.lat ? String(selectedLocationCordinate.lat) : "",
-          lng: selectedLocationCordinate?.lng ? String(selectedLocationCordinate.lng) : "",
-        }).toString()}`;
-
-        console.debug("Generated registration link:", updatedRegistrationLink, "generatedCourseId:", generatedCourseId);
+      const updatedRegistrationLink = `${base}/attendance?courseId=${encodeURIComponent(
+        generatedCourseId
+      )}&time=${encodeURIComponent(time)}&courseCode=${encodeURIComponent(
+        courseCode
+      )}&lat=${encodeURIComponent(selectedLocationCordinate?.lat)}&lng=${encodeURIComponent(
+        selectedLocationCordinate?.lng
+      )}`;
 
       // Set the QR code data and open the QR modal
       setQrData(updatedRegistrationLink);
@@ -239,31 +243,36 @@ const ClassSchedule = () => {
                   readOnly
                   required={true}
                 />
-                <div className="absolute right-0 top-9 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsMapModalOpen(true)}
-                    className="btn px-3 bg-green-500 text-white rounded-r-md hover:bg-green-600 transition-colors"
-                  >
-                    Select Location
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleUseMyLocation}
-                    className="btn px-3 bg-indigo-500 text-white rounded-r-md hover:bg-indigo-600 transition-colors"
-                  >
-                    Use My Current Location
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMapModalOpen(true)}
+                  className="btn absolute right-0 top-9 px-3 bg-green-500 text-white rounded-r-md hover:bg-green-600 transition-colors"
+                >
+                  Select Location
+                </button>
               </div>
+
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={handleUseMyLocation}
+                  className={`btn btn-sm mr-2 ${getLocationLoading ? 'bg-gray-400' : 'bg-indigo-500 hover:bg-indigo-600'} text-white px-3 py-1 rounded`}
+                  disabled={getLocationLoading}
+                >
+                  {getLocationLoading ? 'Detecting...' : 'Use My Current Location'}
+                </button>
+                <span className="text-xs text-neutral-500">Or select location on map</span>
+              </div>
+
               {selectedLocationCordinate && (
-                <div className="mt-2 text-sm text-neutral-700">
-                  <div>
-                    <b>Selected coords:</b> Lat: {selectedLocationCordinate.lat}, Lng: {selectedLocationCordinate.lng}
+                <div className="mb-3 text-sm text-neutral-700">
+                  <p>
+                    <strong>Selected coords:</strong> Lat: {selectedLocationCordinate.lat}, Lng: {selectedLocationCordinate.lng}
+                  </p>
+                  <div className="mt-2">
+                    <button type="button" onClick={swapSelectedCoords} className="btn btn-sm mr-2 bg-yellow-400 text-black px-3 py-1 rounded">Swap coords</button>
+                    <span className="text-xs text-neutral-500">Click to swap if latitude/longitude appear reversed.</span>
                   </div>
-                  {/* <div className="mt-1">
-                    <button type="button" onClick={handleSwapCoords} className="btn btn-xs bg-yellow-500 text-white">Swap coords</button>
-                  </div> */}
                 </div>
               )}
               <Input
